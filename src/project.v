@@ -2,7 +2,7 @@
  * Copyright (c) 2024 Your Name
  * SPDX-License-Identifier: Apache-2.0
  */
-`include "mini_engine.v"
+`include mini_engine.v
 `default_nettype none
 
 
