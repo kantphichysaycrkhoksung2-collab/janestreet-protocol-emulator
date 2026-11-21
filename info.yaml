@@ -20,7 +20,7 @@ project:
   - project.v
   - host_spi.v
   - uart_fifo.v
-  - mini_engine.v
+  - Mini_engine.v
 
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
