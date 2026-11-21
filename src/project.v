@@ -5,34 +5,7 @@
 
 `default_nettype none
 
-module  tt_um_janestreet_emulator  (
-    input  wire [7:0] ui_in,    // Dedicated inputs
-    output wire [7:0] uo_out,   // Dedicated outputs
-    input  wire [7:0] uio_in,   // IOs: Input path
-    output wire [7:0] uio_out,  // IOs: Output path
-    output wire [7:0] uio_oe,   // IOs: Enable path (active high: 0=input, 1=output)
-    input  wire       ena,      // always 1 when the design is powered, so you can ignore it
-    input  wire       clk,      // clock
-    input  wire       rst_n     // reset_n - low to reset
-);
 
-  // All output pins must be assigned. If not used, assign to 0.
-// SPDX-License-Identifier: Apache-2.0
-// tt_um_janestreet_emulator - protocol emulator: host SPI + register file +
-//                             PIO-style microcode engine + hardwired UART
-//                             (UART and engine share the TX/RX FIFOs)
-//
-// ---------------------------------------------------------------- pin map
-//  ui_in[0]  CS_N  \
-//  ui_in[1]  SCK    > host SPI slave, mode 0, 16-bit frames {rw, addr[6:0], data[7:0]}
-//  ui_in[2]  MOSI  /
-//  ui_in[3..7]      engine/UART input pins 8..12   (UART RX default: pin 8 = ui_in[3])
-//  uo_out[0] MISO   (driven 0 while CS_N is high)
-//  uo_out[1..7]     engine/UART output pins 8..14  (UART TX default: pin 8 = uo_out[1])
-//  uio[7:0]         engine/UART pins 0..7, in and out; direction = OEMASK
-//                   (UART TX forces the output enable of its pin when it is uio)
-//  Every output bit is driven; anything not used by the host or firmware idles at 0.
-//  clk >= 4x SCK (8x recommended).  Default CLK_HZ = 25 MHz.
 //
 // ----------------------------------------------------------- pin index space
 //     inputs : idx 0-7  = uio_in[7:0]     idx 8-12 = ui_in[3..7]
