@@ -30,7 +30,7 @@
 
 `default_nettype none
 
-module mini_engine (
+module mini_engine.v(
     input  wire        clk,
     input  wire        rst_n,
     input  wire        run,
