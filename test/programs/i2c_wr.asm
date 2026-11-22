@@ -1,5 +1,3 @@
-.wrap_bot 0
-.wrap_top 13
 SETX 8
 wr_loop:
 IN 0, MSB
