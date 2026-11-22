@@ -1,5 +1,3 @@
-.wrap_bot 0
-.wrap_top 15
 rx_wait:
 IN 8, LSB
 JMP YZ, rx_wait
