@@ -1,5 +1,4 @@
-.wrap_bot 0
-.wrap_top 15
+.wrap_target
 rx_wait:
 IN 8, LSB
 JMP YZ, rx_wait
@@ -12,3 +11,4 @@ IN 8, LSB
 JMP YNZ, rx_loop
 PUSH
 HALT
+.wrap
