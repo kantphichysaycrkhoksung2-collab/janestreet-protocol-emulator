@@ -7,6 +7,6 @@ JMP YNZ, wr_loop
 PUSH
 SETP 0, 0
 SETP 1, 1
-SETP 1, 6
+SETP 1, 1
 SETP 0, 1
 HALT
