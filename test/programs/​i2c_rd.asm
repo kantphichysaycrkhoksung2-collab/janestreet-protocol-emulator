@@ -1,14 +1,13 @@
 .wrap_target
+JMP TXE, done
+PULL
 SETX 8
 rd_loop:
+SETP 1, 1
 IN 0, MSB
-SETP 1, 1
 SETP 1, 0
-JMP YNZ, rd_loop
+JMP XNZ, rd_loop
 PUSH
-SETP 0, 0
-SETP 1, 1
-SETP 1, 1
-SETP 0, 1
-HALT
 .wrap
+done:
+HALT
