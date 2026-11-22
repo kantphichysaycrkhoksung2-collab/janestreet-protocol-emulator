@@ -1,0 +1,9 @@
+.wrap_bot 0
+.wrap_top 7
+SETD 3, 0
+SETD 2, 0
+DLY 10
+SETD 2, 1
+DLY 10
+SETD 3, 1
+HALT
