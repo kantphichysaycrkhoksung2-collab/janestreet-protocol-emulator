@@ -1,5 +1,3 @@
-.wrap_bot 0
-.wrap_top 11
 SETX 8
 spi3_loop:
 SETP 1, 0
