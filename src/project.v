@@ -83,6 +83,8 @@ module tt_um_janestreet_emulator #(
 
   // engine -> register-file requests
   wire       e_pull, e_push, e_pin_we, e_oe_we, e_flags_we, e_halt, e_pin_val;
+  wire       e_oeb_we, e_oeb_val;
+  wire [2:0] e_oeb_idx;
   wire [7:0] e_push_data, e_oe_val, e_flags_val;
   wire [3:0] e_pin_idx;
   wire [4:0] pc;
@@ -116,6 +118,7 @@ module tt_um_janestreet_emulator #(
       // engine requests take priority over host writes in the same cycle
       if (e_pin_we && e_pin_idx != 4'd15) gpio_out[e_pin_idx] <= e_pin_val;
       if (e_oe_we)    oe_mask <= e_oe_val;
+      if (e_oeb_we)   oe_mask[e_oeb_idx] <= e_oeb_val;
       if (e_flags_we) flags   <= e_flags_val;
       if (e_halt)     run     <= 1'b0;
     end
@@ -190,6 +193,7 @@ module tt_um_janestreet_emulator #(
       .pull(e_pull), .push(e_push), .push_data(e_push_data),
       .pin_we(e_pin_we), .pin_idx(e_pin_idx), .pin_val(e_pin_val),
       .oe_we(e_oe_we), .oe_val(e_oe_val),
+      .oeb_we(e_oeb_we), .oeb_idx(e_oeb_idx), .oeb_val(e_oeb_val),
       .flags_we(e_flags_we), .flags_val(e_flags_val),
       .halt(e_halt), .pc_o(pc)
   );
@@ -239,4 +243,3 @@ module tt_um_janestreet_emulator #(
 endmodule
 
 `default_nettype wire
-  
