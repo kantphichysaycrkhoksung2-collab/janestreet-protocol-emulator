@@ -69,9 +69,208 @@ async def load_text(dut, text, name="<inline>"):
     await wr(dut, A_WRAP_TOP, wt)
 
 
-async def load(dut, name):
-    await load_text(dut, open(os.path.join(HERE, "programs", name)).read(), name)
+PROGRAMS = {
+    "uart_tx.asm": """
+; Bit-banged UART transmitter, 8N1, LSB first.  TX on uio[0] (pin 0).
+; Timing: 50 steps per bit  ->  baud = clk / ((CLKDIV+1) * 50)
+; Host: write CLKDIV, WRAP_BOT/TOP (from this file), load, push bytes to TXDATA, run.
+.equ TX 0
+    SETOE 0x01              ; uio[0] output
+    SETP  TX, 1             ; idle high
+.wrap_bot
+    PULL                    ; wait for a byte -> OSR
+    SETP  TX, 0             ; start bit
+    DLY   47                ; 48 steps
+    SETX  7                 ; 8 data bits
+bit:
+    OUT   TX                ; LSB first
+    DLY   47
+    JMP   XNZ, bit          ; OUT(1)+DLY(48)+JMP(1) = 50 steps per bit
+    SETP  TX, 1             ; stop bit
+    DLY   48                ; 50 steps
+.wrap_top
+""",
+    "uart_rx.asm": """
+; Bit-banged UART receiver, 8N1, LSB first.  RX on pin 8 (ui_in[3]).
+; Samples each bit in the middle (50 steps per bit), pushes received bytes to RXDATA.
+.equ RX 8
+.wrap_bot
+    WAITP RX, 0             ; wait for start bit
+    DLY   71                ; skip to the centre of bit 0
+    SETX  7
+bit:
+    IN    RX                ; sample (LSB first)
+    DLY   47
+    JMP   XNZ, bit          ; 1+48+1 = 50 steps per bit
+    PUSH                    ; ~middle of the stop bit
+    WAITP RX, 1             ; wait for the line to go idle
+.wrap_top
+""",
+    "spi_master_mode0.asm": """
+; SPI master, mode 0 (CPOL=0 CPHA=0), MSB first, 8-bit transfers.
+; Pins: SCLK = out 8 (uo_out[1]), MOSI = out 9 (uo_out[2]), CS_N = out 10 (uo_out[3]),
+;       MISO = in 8 (ui_in[3]).
+; Host: queue bytes in TXDATA, run.  Each received byte is pushed to RXDATA.
+; CS_N stays low while more bytes are waiting in the TX FIFO, so queue a whole
+; transaction before starting the engine.   SCLK = clk / ((CLKDIV+1) * 17 steps).
+.equ SCLK 8
+.equ MOSI 9
+.equ CS   10
+.equ MISO 8
+    SETP CS, 1
+    SETP SCLK, 0
+.wrap_bot
+    PULL                    ; first byte of a transaction
+    SETP CS, 0
+    DLY  3                  ; CS setup
+byte:
+    SETX 7
+bit:
+    OUT  MOSI, MSB          ; data changes while SCLK is low
+    DLY  6                  ; setup
+    SETP SCLK, 1            ; rising edge: slave samples MOSI
+    IN   MISO, MSB          ; master samples MISO
+    DLY  4
+    SETP SCLK, 0            ; falling edge
+    JMP  XNZ, bit
+    PUSH                    ; received byte
+    JMP  TXE, done          ; nothing more queued -> end transaction
+    PULL
+    JMP  ALWAYS, byte
+done:
+    DLY  3                  ; CS hold
+    SETP CS, 1
+.wrap_top
+""",
+    "spi_master_mode3.asm": """
+; SPI master, mode 3 (CPOL=1 CPHA=1), MSB first.  Same pins and host protocol as mode 0.
+.equ SCLK 8
+.equ MOSI 9
+.equ CS   10
+.equ MISO 8
+    SETP CS, 1
+    SETP SCLK, 1            ; idle high
+.wrap_bot
+    PULL
+    SETP CS, 0
+    DLY  3
+byte:
+    SETX 7
+bit:
+    SETP SCLK, 0            ; falling edge: slave shifts out the next MISO bit
+    OUT  MOSI, MSB          ; MOSI changes after the falling edge
+    DLY  6
+    SETP SCLK, 1            ; rising edge: both sides sample
+    IN   MISO, MSB
+    DLY  4
+    JMP  XNZ, bit
+    PUSH
+    JMP  TXE, done
+    PULL
+    JMP  ALWAYS, byte
+done:
+    DLY  3
+    SETP CS, 1
+.wrap_top
+""",
+    "i2c_wr.asm": """
+; I2C master: (repeated) START + send bytes.  SDA = uio[0] (pin 0), SCL = uio[1] (pin 1),
+; both open-drain: the engine only ever drives them low or releases them (SETD / OUT od),
+; clock stretching is honoured by WAITP SCL.
+;
+; TX FIFO: first byte = (7-bit address << 1) | R/W, then data bytes. Natural bit order.
+; For every byte sent one status byte is pushed to RXDATA: 0x00 = ACK, 0x80 = NACK.
+; On NACK the transaction is aborted and the rest of the TX FIFO is flushed.
+; Ends with HALT; the bus stays claimed (SCL low) so that another program can continue
+; (i2c_rd.asm, i2c_stop.asm, or i2c_wr.asm again for a repeated START).
+; 5 steps per SCL period: SCL = clk / ((CLKDIV+1) * 5).
+.equ SDA 0
+.equ SCL 1
+    PULL                    ; address byte -> OSR
+    SETD SDA, 1             ; make sure both lines are released (repeated START prep)
+    SETD SCL, 1
+    WAITP SCL, 1
+    DLY  1
+    SETD SDA, 0             ; START: SDA falls while SCL is high
+    DLY  1
+    SETD SCL, 0
+byte:
+    SETX 7
+bit:
+    OUT  SDA, MSB, OD       ; SDA = OSR[7] (drive low or release)
+    SETD SCL, 1
+    WAITP SCL, 1            ; clock stretching
+    SETD SCL, 0
+    JMP  XNZ, bit
+    SETD SDA, 1             ; release SDA for the ACK slot
+    SETD SCL, 1
+    WAITP SCL, 1
+    SETI 0
+    IN   SDA                ; ISR[7] = ACK bit (0 = ACK)
+    PUSH                    ; report 0x00 / 0x80
+    JMPH SDA, nack          ; SDA still high -> NACK
+    SETD SCL, 0
+    JMP  TXE, done
+    PULL
+    JMP  ALWAYS, byte
+nack:
+    SETD SCL, 0
+flush:
+    JMP  TXE, done
+    PULL
+    JMP  ALWAYS, flush
+done:
+    HALT
+""",
+    "i2c_rd.asm": """
+; I2C master: read bytes.  Continues after i2c_wr.asm sent an address byte with R/W=1
+; (bus claimed, SCL low).  TX FIFO: one dummy byte per byte to read.
+; Every received byte is pushed to RXDATA (MSB first, natural order).
+; All bytes are ACKed except the last one (NACK), then HALT; use i2c_stop.asm next.
+.equ SDA 0
+.equ SCL 1
+rbyte:
+    PULL                    ; consume one token
+    SETX 7
+rbit:
+    SETD SCL, 1
+    WAITP SCL, 1            ; clock stretching
+    IN   SDA, MSB
+    SETD SCL, 0
+    JMP  XNZ, rbit
+    PUSH
+    JMP  TXE, nackbyte      ; no more tokens: this was the last byte
+    SETD SDA, 0             ; ACK
+    JMP  ALWAYS, ackclk
+nackbyte:
+    SETD SDA, 1             ; NACK (released)
+ackclk:
+    SETD SCL, 1
+    WAITP SCL, 1
+    SETD SCL, 0
+    SETD SDA, 1             ; release SDA
+    JMP  TXE, done
+    JMP  ALWAYS, rbyte
+done:
+    HALT
+""",
+    "i2c_stop.asm": """
+; I2C master: STOP condition (bus must be claimed: SCL low).
+.equ SDA 0
+.equ SCL 1
+    SETD SDA, 0             ; SDA low while SCL is low
+    SETD SCL, 1
+    WAITP SCL, 1
+    DLY  1
+    SETD SDA, 1             ; SDA rises while SCL is high = STOP
+    DLY  3                  ; bus free time
+    HALT
+""",
+}
 
+
+async def load(dut, name):
+    await load_text(dut, PROGRAMS[name], name)
 
 async def wait_halt(dut, polls=400):
     for _ in range(polls):
