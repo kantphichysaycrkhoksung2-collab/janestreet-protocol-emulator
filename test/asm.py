@@ -1,155 +1,184 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
-"""Assembler for the mini microcode engine (32 x 16-bit words).
+"""Assembler for the protocol-emulator mini engine (see src/Mini_engine.v).
 
-Word = op[15:12] | a[11:8] | imm[7:0]
-Directives: .wrap_target (next instruction = wrap bottom), .wrap (last instruction = wrap top)
-Default wrap: bottom = 0, top = last instruction.
+Source syntax (one statement per line, ';' starts a comment):
+
+    .equ SDA 0              ; named constant
+    .wrap_bot               ; PC wraps to the next instruction ...
+    .wrap_top               ; ... after the previous instruction executes
+    label:
+        MNEMONIC operands
+
+Mnemonics
+    DLY n                   idle n extra steps (instruction takes n+1 steps)
+    SETP pin, v             push-pull drive pin to v
+    SETD pin, v             open-drain: v=0 drive low, v=1 release   (pin 0-7)
+    SETOE mask              uio output-enable mask
+    WAITP pin, v            stall until pin == v
+    JMP cond, label         cond: ALWAYS XNZ(X!=0, X--) YNZ(Y!=0, Y--) TXE OSR0 OSR7
+    JMPH pin, label         jump if pin high (pin 0-7)
+    JMPL pin, label         jump if pin low  (pin 0-7)
+    PULL / PUSH / HALT
+    OUT pin [, MSB] [, OD]  shift OSR to pin; MSB = MSB-first, OD = open-drain
+    IN pin [, MSB]          shift pin into ISR; MSB = MSB-first
+    SETX n / SETY n / SETO n (OSR) / SETI n (ISR) / SETF n (flags)
+
+Command line:
+    python3 asm.py prog.asm            listing + wrap info
+    python3 asm.py prog.asm --c NAME   C array (for the RP2350 host)
+    python3 asm.py prog.asm --py NAME  Python list
 """
+import argparse
 import re
 import sys
 
-MAX_WORDS = 32
-OPS = {"DLY": 0, "SETP": 1, "SETOE": 2, "WAITP": 3, "JMP": 4, "PULL": 5, "PUSH": 6,
-       "OUT": 7, "IN": 8, "SETX": 9, "SETY": 10, "SETO": 11, "SETF": 12, "HALT": 13,
-       "SETD": 14, "SETI": 15}
-CONDS = {"ALWAYS": 0, "XNZ": 1, "YNZ": 2, "TXE": 3, "OSR0": 6, "OSR7": 7}
-IMM_ONLY = {"DLY", "SETOE", "SETX", "SETY", "SETO", "SETI", "SETF"}
-NOARG = {"PULL", "PUSH", "HALT"}
+OPS = dict(DLY=0, SETP=1, SETOE=2, WAITP=3, JMP=4, PULL=5, PUSH=6, OUT=7, IN=8,
+           SETX=9, SETY=10, SETO=11, SETF=12, HALT=13, SETD=14, SETI=15)
+CONDS = dict(ALWAYS=0, XNZ=1, YNZ=2, TXE=3, PINH=4, PINL=5, OSR0=6, OSR7=7)
+MODS = dict(MSB=1, OD=2)
+IMEM_WORDS = 32
 
 
 class AsmError(Exception):
     pass
 
 
-def _num(tok, name, line, lo, hi, what):
-    try:
-        v = int(tok, 0)
-    except ValueError:
-        raise AsmError("%s:%d: %s: expected a number, got '%s'" % (name, line, what, tok))
-    if not lo <= v <= hi:
-        raise AsmError("%s:%d: %s out of range %d..%d: %d" % (name, line, what, lo, hi, v))
-    return v
+class Program:
+    def __init__(self, words, wrap_bot, wrap_top, labels, listing):
+        self.words, self.wrap_bot, self.wrap_top = words, wrap_bot, wrap_top
+        self.labels, self.listing = labels, listing
+
+    def __iter__(self):
+        return iter((self.words, self.wrap_bot, self.wrap_top))
 
 
-def assemble(text, name="<asm>"):
-    """Return (words, wrap_bot, wrap_top)."""
-    items, labels = [], {}
-    wrap_bot, wrap_top = None, None
-    for ln, raw in enumerate(text.splitlines(), 1):
-        s = re.split(r";|#|//", raw)[0].strip()
-        while True:
-            m = re.match(r"^([A-Za-z_]\w*)\s*:\s*(.*)$", s)
-            if not m:
-                break
-            if m.group(1) in labels:
-                raise AsmError("%s:%d: duplicate label '%s'" % (name, ln, m.group(1)))
-            labels[m.group(1)] = len(items)
-            s = m.group(2)
-        if not s:
+def assemble(src, name='<asm>'):
+    equ, labels, prog = {}, {}, []
+    wrap_bot, wrap_top = 0, IMEM_WORDS - 1
+
+    def num(tok, lineno):
+        tok = tok.strip()
+        if tok in equ:
+            return equ[tok]
+        try:
+            return int(tok, 0)
+        except ValueError:
+            raise AsmError('%s:%d: bad number or unknown symbol %r' % (name, lineno, tok))
+
+    for lineno, raw in enumerate(src.splitlines(), 1):
+        line = raw.split(';')[0].strip()
+        if not line:
             continue
-        low = s.lower()
-        if low == ".wrap_target":
-            wrap_bot = len(items)
+        if line.endswith(':'):
+            labels[line[:-1].strip()] = len(prog)
             continue
-        if low == ".wrap":
-            if not items:
-                raise AsmError("%s:%d: .wrap before any instruction" % (name, ln))
-            wrap_top = len(items) - 1
+        if line.startswith('.'):
+            parts = line.split()
+            if parts[0] == '.equ':
+                equ[parts[1]] = int(parts[2], 0) if parts[2] not in equ else equ[parts[2]]
+            elif parts[0] == '.wrap_bot':
+                wrap_bot = len(prog)
+            elif parts[0] == '.wrap_top':
+                wrap_top = len(prog) - 1
+            else:
+                raise AsmError('%s:%d: unknown directive %s' % (name, lineno, parts[0]))
             continue
-        parts = s.split(None, 1)
-        mn = parts[0].upper()
-        args = [a.strip() for a in parts[1].split(",")] if len(parts) > 1 else []
-        if mn not in OPS and mn not in ("JMPH", "JMPL"):
-            raise AsmError("%s:%d: unknown mnemonic '%s'" % (name, ln, parts[0]))
-        items.append((ln, mn, args))
-    if len(items) > MAX_WORDS:
-        raise AsmError("%s: program has %d instructions, max %d" % (name, len(items), MAX_WORDS))
+        mn, _, rest = line.partition(' ')
+        mn = mn.upper()
+        args = [a.strip() for a in re.split(r'[,|]', rest) if a.strip()]
+        prog.append((mn, args, lineno, raw.strip()))
 
-    def target(tok, ln):
-        if tok in labels:
-            return labels[tok]
-        if re.match(r"^(0x[0-9a-fA-F]+|\d+|0b[01]+)$", tok):
-            return _num(tok, name, ln, 0, MAX_WORDS - 1, "jump target")
-        raise AsmError("%s:%d: unknown label '%s'" % (name, ln, tok))
+    if len(prog) > IMEM_WORDS:
+        raise AsmError('%s: program has %d words, instruction memory holds %d' % (name, len(prog), IMEM_WORDS))
+    words, listing = [], []
+    for addr, (mn, args, lineno, raw) in enumerate(prog):
+        def err(msg):
+            return AsmError('%s:%d: %s' % (name, lineno, msg))
 
-    words = []
-    for ln, mn, args in items:
         def need(n):
-            if len(args) != n:
-                raise AsmError("%s:%d: %s takes %d operand(s), got %d" % (name, ln, mn, n, len(args)))
+            if len(args) < n:
+                raise err('%s needs %d operand(s)' % (mn, n))
+
         a = imm = 0
-        if mn in NOARG:
-            need(0)
-        elif mn in IMM_ONLY:
+        if mn in ('SETP', 'WAITP', 'SETD'):
+            need(2)
+            a, imm = num(args[0], lineno), num(args[1], lineno)
+            if imm not in (0, 1):
+                raise err('value must be 0 or 1')
+            op = OPS[mn]
+        elif mn == 'JMP':
+            need(2)
+            cname = args[0].upper()
+            if cname not in CONDS or cname in ('PINH', 'PINL'):
+                raise err('bad JMP condition %r (use JMPH/JMPL for pins)' % args[0])
+            a = CONDS[cname]
+            if args[1] not in labels and not re.match(r'^\w+$', args[1]):
+                raise err('bad label')
+            imm = ('label', args[1])
+            op = OPS['JMP']
+        elif mn in ('JMPH', 'JMPL'):
+            need(2)
+            pin = num(args[0], lineno)
+            if not 0 <= pin <= 7:
+                raise err('JMPH/JMPL pin must be 0-7')
+            a = CONDS['PINH' if mn == 'JMPH' else 'PINL']
+            imm = ('label', args[1], pin)
+            op = OPS['JMP']
+        elif mn in ('OUT', 'IN'):
             need(1)
-            imm = _num(args[0], name, ln, 0, 255, mn + " operand")
-        elif mn in ("SETP", "SETD"):
-            need(2)
-            a = _num(args[0], name, ln, 0, 7 if mn == "SETD" else 14, "output pin")
-            imm = _num(args[1], name, ln, 0, 1, "value")
-        elif mn == "WAITP":
-            need(2)
-            a = _num(args[0], name, ln, 0, 12, "input pin")
-            imm = _num(args[1], name, ln, 0, 1, "value")
-        elif mn == "JMP":
-            need(2)
-            c = args[0].upper()
-            if c not in CONDS:
-                raise AsmError("%s:%d: unknown condition '%s' (use %s, or JMPH/JMPL)"
-                               % (name, ln, args[0], " ".join(CONDS)))
-            a, imm = CONDS[c], target(args[1], ln)
-        elif mn in ("JMPH", "JMPL"):
-            need(2)
-            p = _num(args[0], name, ln, 0, 7, "pin (0-7 for JMPH/JMPL)")
-            a, imm = (4 if mn == "JMPH" else 5), (p << 5) | target(args[1], ln)
-        elif mn in ("OUT", "IN"):
-            if not args:
-                raise AsmError("%s:%d: %s needs a pin" % (name, ln, mn))
-            a = _num(args[0], name, ln, 0, 14 if mn == "OUT" else 12, "pin")
-            for mod in (m.upper() for m in args[1:]):
-                if mod == "MSB":
-                    imm |= 1
-                elif mod == "LSB":
-                    pass
-                elif mod == "OD" and mn == "OUT":
-                    if a > 7:
-                        raise AsmError("%s:%d: OD only works on pins 0-7" % (name, ln))
-                    imm |= 2
-                else:
-                    raise AsmError("%s:%d: bad modifier '%s' for %s" % (name, ln, mod, mn))
-        words.append((OPS.get(mn, 4) << 12) | (a << 8) | imm)
-    if not words:
-        raise AsmError("%s: empty program" % name)
-    wb = 0 if wrap_bot is None else wrap_bot
-    wt = len(words) - 1 if wrap_top is None else wrap_top
-    if wb >= len(words) or wb > wt:
-        raise AsmError("%s: bad wrap range %d..%d" % (name, wb, wt))
-    return words, wb, wt
+            a = num(args[0], lineno)
+            for m in args[1:]:
+                if m.upper() not in MODS:
+                    raise err('unknown modifier %r' % m)
+                if mn == 'IN' and m.upper() == 'OD':
+                    raise err('IN has no OD modifier')
+                imm |= MODS[m.upper()]
+            op = OPS[mn]
+        elif mn in ('PULL', 'PUSH', 'HALT'):
+            op = OPS[mn]
+        elif mn in ('DLY', 'SETOE', 'SETX', 'SETY', 'SETO', 'SETI', 'SETF'):
+            need(1)
+            imm = num(args[0], lineno)
+            if not 0 <= imm <= 255:
+                raise err('immediate out of range 0..255')
+            op = OPS[mn]
+        else:
+            raise err('unknown mnemonic %r' % mn)
+        if not 0 <= a <= 15:
+            raise err('pin/condition out of range')
+        if isinstance(imm, tuple):
+            if imm[1] not in labels:
+                raise err('undefined label %r' % imm[1])
+            tgt = labels[imm[1]]
+            if tgt >= IMEM_WORDS:
+                raise err('label %r is past the end of instruction memory' % imm[1])
+            imm = tgt | ((imm[2] << 5) if len(imm) > 2 else 0)
+        word = (op << 12) | (a << 8) | imm
+        words.append(word)
+        listing.append('%02d: %04X  %s' % (addr, word, raw))
+    return Program(words, wrap_bot, wrap_top, labels, listing)
 
 
-def main(argv):
-    args = [a for a in argv[1:] if not a.startswith("--")]
-    flags = [a for a in argv[1:] if a.startswith("--")]
-    if len(args) != 1:
-        print("usage: asm.py prog.asm [--c | --py]")
-        return 2
-    try:
-        words, wb, wt = assemble(open(args[0]).read(), args[0])
-    except AsmError as e:
-        print("error:", e, file=sys.stderr)
-        return 1
-    if "--c" in flags:
-        print("static const uint16_t prog[%d] = {%s};" % (len(words), ", ".join("0x%04X" % w for w in words)))
-        print("#define WRAP_BOT %d\n#define WRAP_TOP %d" % (wb, wt))
-    elif "--py" in flags:
-        print("PROG = [%s]\nWRAP_BOT, WRAP_TOP = %d, %d" % (", ".join("0x%04X" % w for w in words), wb, wt))
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('file')
+    ap.add_argument('--c', metavar='NAME')
+    ap.add_argument('--py', metavar='NAME')
+    a = ap.parse_args()
+    p = assemble(open(a.file).read(), a.file)
+    if a.c:
+        print('static const uint16_t %s[%d] = {%s};' % (a.c, len(p.words), ', '.join('0x%04X' % w for w in p.words)))
+        print('#define %s_WRAP_BOT %d\n#define %s_WRAP_TOP %d' % (a.c.upper(), p.wrap_bot, a.c.upper(), p.wrap_top))
+    elif a.py:
+        print('%s = dict(words=[%s], wrap_bot=%d, wrap_top=%d)' % (
+            a.py, ', '.join('0x%04X' % w for w in p.words), p.wrap_bot, p.wrap_top))
     else:
-        for i, w in enumerate(words):
-            print("%2d: %04X" % (i, w))
-        print("wrap_bot=%d wrap_top=%d" % (wb, wt))
-    return 0
+        print('\n'.join(p.listing))
+        print('; %d words, wrap_bot=%d wrap_top=%d' % (len(p.words), p.wrap_bot, p.wrap_top))
 
 
-if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+if __name__ == '__main__':
+    try:
+        main()
+    except AsmError as e:
+        sys.exit(str(e))
